@@ -10,6 +10,7 @@ dist/
 
 # wasm-pack output (regenerated)
 /web/src/wasm/
+/web/public/wasm/
 
 # Editor
 .vscode/
