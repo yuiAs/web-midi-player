@@ -43,9 +43,13 @@
   let modeOverride = $state<MidiModeId | 'auto'>('auto');
   let loopEnabled = $state(false);
 
-  // Sync the loop toggle to the worklet whenever the local flag changes.
+  // Read the reactive dep outside the optional chain. `client?.x(arg)`
+  // short-circuits when client is null, which skips arg evaluation and
+  // therefore skips dependency tracking — the effect would never re-run
+  // when the dep changes later.
   $effect(() => {
-    client?.setLoop(loopEnabled);
+    const enabled = loopEnabled;
+    client?.setLoop(enabled);
   });
   let logLines = $state<string[]>([]);
   let autoFollow = $state(true);
