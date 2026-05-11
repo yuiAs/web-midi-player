@@ -135,6 +135,7 @@
     midiName = name;
     position = { tick: 0, secs: 0, bpm: 120, isPlaying: false };
     logLines = [];
+    changeModeOverride('auto');
     client?.loadMidi(bytes);
   }
 
