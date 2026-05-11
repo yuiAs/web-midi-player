@@ -1,7 +1,18 @@
 //! web-midi-player core (Wasm).
 //!
-//! Phase 1: minimal `add` export to verify the wasm-pack -> Vite pipeline.
-//! Real MIDI / SF2 / synthesizer surface will land in Phase 2+.
+//! Phase 2 layer-in: MIDI parsing modules ported from the ump native crate.
+//! Synthesis + sequencer wiring lands in subsequent steps.
+
+// `#[macro_use]` mirrors ump's main.rs so log_info!/log_warn!/log_error!
+// are reachable from sibling modules without explicit imports.
+#[macro_use]
+pub mod debug;
+pub mod midi;
+pub mod player;
+pub mod sequencer;
+pub mod synth;
+
+pub use player::Player;
 
 use wasm_bindgen::prelude::*;
 
