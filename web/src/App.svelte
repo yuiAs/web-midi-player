@@ -19,6 +19,7 @@
   import LogView from './components/LogView.svelte';
   import Segmented from './components/Segmented.svelte';
   import Switch from './components/Switch.svelte';
+  import Slider from './components/Slider.svelte';
 
   // Cap MIDI event log to prevent unbounded growth.
   // ~10k lines × ~60 bytes ≈ 600 KB — comfortable.
@@ -42,6 +43,9 @@
   let position = $state<PositionSnapshot>({ tick: 0, secs: 0, bpm: 120, isPlaying: false });
   let modeOverride = $state<MidiModeId | 'auto'>('auto');
   let loopEnabled = $state(false);
+  // Slider domain is 0..100; the audible gain is volume²/10000 so the
+  // perceived loudness curve feels roughly linear to the ear.
+  let volume = $state(100);
 
   // Read the reactive dep outside the optional chain. `client?.x(arg)`
   // short-circuits when client is null, which skips arg evaluation and
@@ -50,6 +54,10 @@
   $effect(() => {
     const enabled = loopEnabled;
     client?.setLoop(enabled);
+  });
+  $effect(() => {
+    const gain = (volume / 100) ** 2;
+    client?.setVolume(gain);
   });
   let logLines = $state<string[]>([]);
   let autoFollow = $state(true);
@@ -233,7 +241,10 @@
           <code>{fmtTime(position.secs)}</code>
           <span class="dim">/ {fmtTime(midiInfo?.duration_secs ?? 0)}</span>
         </span>
-        <Switch bind:checked={loopEnabled} label="Loop" />
+        <div class="transport-controls">
+          <Slider bind:value={volume} label="Vol" format={(v) => `${v}%`} />
+          <Switch bind:checked={loopEnabled} label="Loop" />
+        </div>
       </div>
     </section>
 
@@ -329,6 +340,12 @@
     gap: 0.75rem;
     flex-wrap: wrap;
     margin-top: 0.75rem;
+  }
+  .transport-controls {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
   }
   .time {
     font-size: 0.95rem;

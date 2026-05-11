@@ -65,6 +65,7 @@ const CLEAR_OVERRIDE = 255;
 export class SynthClient {
   private ctx: AudioContext | null = null;
   private node: AudioWorkletNode | null = null;
+  private gain: GainNode | null = null;
   private readyPromise: Promise<void> | null = null;
 
   constructor(private readonly events: SynthClientEvents = {}) {}
@@ -124,11 +125,33 @@ export class SynthClient {
       }
     };
 
-    node.connect(ctx.destination);
+    // Master gain sits between the worklet and destination so volume can
+    // be tweaked without rebuilding the graph.
+    const gain = ctx.createGain();
+    this.gain = gain;
+    node.connect(gain).connect(ctx.destination);
 
     if (ctx.state === 'suspended') {
       await ctx.resume();
     }
+  }
+
+  /**
+   * Set master output gain. `value` is a linear multiplier (1.0 = unity).
+   * Uses a short linear ramp instead of `setTargetAtTime` because the
+   * latter is asymptotic — target=0 never actually reaches silence.
+   * `cancelScheduledValues` clears any pending ramp so dragging the
+   * slider does not pile up overlapping automations.
+   */
+  setVolume(value: number): void {
+    const g = this.gain;
+    const ctx = this.ctx;
+    if (!g || !ctx) return;
+    const target = Math.max(0, value);
+    const now = ctx.currentTime;
+    g.gain.cancelScheduledValues(now);
+    g.gain.setValueAtTime(g.gain.value, now);
+    g.gain.linearRampToValueAtTime(target, now + 0.02);
   }
 
   get audioContext(): AudioContext | null {
