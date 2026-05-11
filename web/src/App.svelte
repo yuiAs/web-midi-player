@@ -14,6 +14,15 @@
     lineMatches,
     type FilterFlags,
   } from './lib/logFilter';
+  import {
+    loadVolume,
+    saveVolume,
+    loadLoop,
+    saveLoop,
+    loadSf2Handle,
+    saveSf2Handle,
+    clearSf2Handle,
+  } from './lib/persist';
   import FileLoader from './components/FileLoader.svelte';
   import Controls from './components/Controls.svelte';
   import LogView from './components/LogView.svelte';
@@ -37,15 +46,19 @@
   // ---- File / playback state ----------------------------------------------
   let sf2Loaded = $state(false);
   let sf2Name = $state<string | null>(null);
+  let sf2Size = $state<number | null>(null);
   let midiInfo = $state<MidiInfoSnapshot | null>(null);
   let midiName = $state<string | null>(null);
+  let midiSize = $state<number | null>(null);
 
   let position = $state<PositionSnapshot>({ tick: 0, secs: 0, bpm: 120, isPlaying: false });
   let modeOverride = $state<MidiModeId | 'auto'>('auto');
-  let loopEnabled = $state(false);
+  // Restore last session's preferences synchronously from localStorage so the
+  // first render already shows the persisted values.
+  let loopEnabled = $state(loadLoop());
   // Slider domain is 0..100; the audible gain is volume²/10000 so the
   // perceived loudness curve feels roughly linear to the ear.
-  let volume = $state(100);
+  let volume = $state(loadVolume());
 
   // Read the reactive dep outside the optional chain. `client?.x(arg)`
   // short-circuits when client is null, which skips arg evaluation and
@@ -54,10 +67,12 @@
   $effect(() => {
     const enabled = loopEnabled;
     client?.setLoop(enabled);
+    saveLoop(enabled);
   });
   $effect(() => {
-    const gain = (volume / 100) ** 2;
-    client?.setVolume(gain);
+    const v = volume;
+    client?.setVolume((v / 100) ** 2);
+    saveVolume(v);
   });
   let logLines = $state<string[]>([]);
   let autoFollow = $state(true);
@@ -72,6 +87,10 @@
   );
 
   let client: SynthClient | null = null;
+  // Handle fetched in onMount so the Start Audio click can synchronously
+  // consume it for requestPermission(), which requires transient user
+  // activation. Re-fetched on demand if the click beats onMount.
+  let pendingSf2Handle: FileSystemFileHandle | null = null;
 
   const canPlay = $derived(audioStatus === 'ready' && sf2Loaded && !!midiInfo);
 
@@ -96,15 +115,39 @@
     await loadCore();
     coreVersion = core_version();
     coreReady = true;
+    pendingSf2Handle = await loadSf2Handle();
   });
 
   async function startAudio() {
     if (client) return;
     audioStatus = 'starting';
+
+    // Resolve SF2 read permission while the user-activation from this
+    // click is still fresh. Browsers gate requestPermission() on transient
+    // activation; calling it from onReady (which arrives via postMessage)
+    // would always fail.
+    const handle = pendingSf2Handle ?? (await loadSf2Handle());
+    pendingSf2Handle = null;
+    let restorable: FileSystemFileHandle | null = null;
+    if (handle) {
+      if (await ensureReadPermission(handle)) {
+        restorable = handle;
+      } else {
+        await clearSf2Handle();
+      }
+    }
+
     client = new SynthClient({
       onReady: (sr) => {
         workletSampleRate = sr;
         audioStatus = 'ready';
+        // The $effect for volume/loop already ran at mount with client=null,
+        // so apply the current values explicitly now that the audio graph
+        // exists. Otherwise the worklet keeps its built-in defaults instead
+        // of the persisted ones.
+        client?.setVolume((volume / 100) ** 2);
+        client?.setLoop(loopEnabled);
+        if (restorable) void loadSf2FromHandle(restorable);
       },
       onSf2Loaded: () => {
         sf2Loaded = true;
@@ -136,19 +179,70 @@
     }
   }
 
-  function handleSf2(bytes: Uint8Array, name: string) {
+  function handleSf2(
+    bytes: Uint8Array,
+    name: string,
+    handle: FileSystemFileHandle | undefined,
+  ) {
     sf2Loaded = false;
     sf2Name = name;
+    sf2Size = bytes.byteLength;
     client?.loadSf2(bytes);
+    // Browsers without the File System Access API never hand us a handle;
+    // wipe any stale entry from a previous capable-browser session so a
+    // newer pick isn't shadowed by an old auto-restore.
+    if (handle) void saveSf2Handle(handle);
+    else void clearSf2Handle();
   }
 
-  function handleMidi(bytes: Uint8Array, name: string) {
+  function handleMidi(
+    bytes: Uint8Array,
+    name: string,
+    _handle: FileSystemFileHandle | undefined,
+  ) {
     midiInfo = null;
     midiName = name;
+    midiSize = bytes.byteLength;
     position = { tick: 0, secs: 0, bpm: 120, isPlaying: false };
     logLines = [];
     changeModeOverride('auto');
     client?.loadMidi(bytes);
+  }
+
+  // queryPermission first to avoid an unnecessary prompt when the user
+  // previously chose "Allow on every visit"; otherwise prompt via
+  // requestPermission. Returns false on any failure so the caller can
+  // fall back to a clean unloaded state.
+  async function ensureReadPermission(handle: FileSystemFileHandle): Promise<boolean> {
+    const h = handle as unknown as {
+      queryPermission?: (d: { mode: 'read' }) => Promise<PermissionState>;
+      requestPermission?: (d: { mode: 'read' }) => Promise<PermissionState>;
+    };
+    if (typeof h.queryPermission !== 'function' || typeof h.requestPermission !== 'function') {
+      return false;
+    }
+    try {
+      let state = await h.queryPermission({ mode: 'read' });
+      if (state === 'granted') return true;
+      state = await h.requestPermission({ mode: 'read' });
+      return state === 'granted';
+    } catch {
+      return false;
+    }
+  }
+
+  async function loadSf2FromHandle(handle: FileSystemFileHandle): Promise<void> {
+    try {
+      const file = await handle.getFile();
+      const buf = await file.arrayBuffer();
+      sf2Loaded = false;
+      sf2Name = file.name;
+      sf2Size = buf.byteLength;
+      client?.loadSf2(new Uint8Array(buf));
+    } catch {
+      // File was moved or deleted between save and read; drop the stale entry.
+      await clearSf2Handle();
+    }
   }
 
   function changeModeOverride(v: MidiModeId | 'auto') {
@@ -193,8 +287,20 @@
   {:else}
     <section>
       <h2>Files</h2>
-      <FileLoader label="SF2" accept=".sf2,.sf3" onload={handleSf2} />
-      <FileLoader label="MIDI" accept=".mid,.midi" onload={handleMidi} />
+      <FileLoader
+        label="SF2"
+        accept=".sf2,.sf3"
+        fileName={sf2Name}
+        fileSize={sf2Size}
+        onload={handleSf2}
+      />
+      <FileLoader
+        label="MIDI"
+        accept=".mid,.midi"
+        fileName={midiName}
+        fileSize={midiSize}
+        onload={handleMidi}
+      />
       {#if lastError}<p class="err"><code>{lastError}</code></p>{/if}
     </section>
 

@@ -1,36 +1,72 @@
 <script lang="ts">
+  import { fileOpen, type FileWithHandle } from 'browser-fs-access';
+
   interface Props {
     label: string;
+    /** Comma-separated extensions, e.g. ".sf2,.sf3". Mirrors <input accept>. */
     accept: string;
-    onload: (bytes: Uint8Array, name: string) => void;
+    /** Currently displayed file name (lets the parent show restored files). */
+    fileName?: string | null;
+    /** Currently displayed file size in bytes. */
+    fileSize?: number | null;
+    onload: (
+      bytes: Uint8Array,
+      name: string,
+      handle: FileSystemFileHandle | undefined,
+    ) => void;
     disabled?: boolean;
   }
 
-  const { label, accept, onload, disabled = false }: Props = $props();
+  const {
+    label,
+    accept,
+    fileName = null,
+    fileSize = null,
+    onload,
+    disabled = false,
+  }: Props = $props();
 
-  let inputEl: HTMLInputElement | undefined = $state();
-  let fileName = $state<string | null>(null);
-  let fileSize = $state<number | null>(null);
   let loading = $state(false);
 
-  async function onChange(e: Event) {
-    const input = e.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
+  // ".sf2,.sf3" -> [".sf2", ".sf3"]. fileOpen() expects leading dots.
+  const extensions = $derived(
+    accept
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.startsWith('.')),
+  );
 
+  // `id` lets the picker remember the directory per-extension between sessions
+  // in Chromium; a stable string keyed on extensions is enough.
+  const pickerId = $derived(`wmp-${extensions.join('').replace(/\./g, '')}`);
+
+  async function pick() {
+    if (loading || disabled) return;
     loading = true;
     try {
+      const file = (await fileOpen({
+        description: label,
+        extensions,
+        id: pickerId,
+        multiple: false,
+      })) as FileWithHandle;
       const buf = await file.arrayBuffer();
-      fileName = file.name;
-      fileSize = file.size;
-      onload(new Uint8Array(buf), file.name);
+      onload(new Uint8Array(buf), file.name, file.handle);
+    } catch (e) {
+      // User cancellation throws AbortError / DOMException — stay quiet.
+      if (!isAbortError(e)) throw e;
     } finally {
       loading = false;
-      // Clear so re-picking the SAME file fires onchange again. Because the
-      // native input is hidden the user never sees the "No file chosen" text;
-      // the meta span on the right is our source of truth for what is loaded.
-      input.value = '';
     }
+  }
+
+  function isAbortError(e: unknown): boolean {
+    return (
+      typeof e === 'object' &&
+      e !== null &&
+      'name' in e &&
+      (e as { name: string }).name === 'AbortError'
+    );
   }
 
   function formatSize(bytes: number): string {
@@ -46,18 +82,10 @@
     type="button"
     class="picker"
     disabled={disabled || loading}
-    onclick={() => inputEl?.click()}
+    onclick={pick}
   >
     {loading ? 'Loading…' : 'Choose…'}
   </button>
-  <input
-    bind:this={inputEl}
-    type="file"
-    {accept}
-    disabled={disabled || loading}
-    onchange={onChange}
-    hidden
-  />
   {#if fileName}
     <span class="meta">
       <code>{fileName}</code>

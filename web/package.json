@@ -23,6 +23,7 @@
     "vite-plugin-wasm": "^3.6.0"
   },
   "dependencies": {
-    "@tanstack/svelte-virtual": "^3.13.24"
+    "@tanstack/svelte-virtual": "^3.13.24",
+    "browser-fs-access": "^0.38.0"
   }
 }
