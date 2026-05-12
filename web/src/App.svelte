@@ -23,9 +23,15 @@
     saveSf2Handle,
     clearSf2Handle,
   } from './lib/persist';
+  import {
+    applyLogLines,
+    MAX_CHANNELS,
+    type ChannelState,
+  } from './lib/channelState';
   import FileLoader from './components/FileLoader.svelte';
   import Controls from './components/Controls.svelte';
   import LogView from './components/LogView.svelte';
+  import ChannelTable from './components/ChannelTable.svelte';
   import Segmented from './components/Segmented.svelte';
   import Switch from './components/Switch.svelte';
   import Slider from './components/Slider.svelte';
@@ -83,6 +89,13 @@
   let logLines = $state<string[]>([]);
   let autoFollow = $state(true);
   let filters = $state<FilterFlags>({ ...DEFAULT_FILTERS });
+
+  // Per-channel synth state derived from the log stream. Null entries are
+  // channels that have not yet emitted any event we care about, so the
+  // ChannelTable can skip them and the layout doesn't show empty rows.
+  let channelStates = $state<(ChannelState | null)[]>(
+    new Array(MAX_CHANNELS).fill(null),
+  );
 
   // Filtered view fed to LogView. Recomputes only when logLines or filters
   // change — cheap enough for 10k-row logs.
@@ -150,6 +163,10 @@
         position = p;
       },
       onLogLines: (lines) => {
+        // Fold every batch into channelStates BEFORE the log buffer trims —
+        // a CC value we discard from the log would otherwise vanish from
+        // the channel table next reset cycle.
+        applyLogLines(channelStates, lines);
         const combined = logLines.length + lines.length;
         if (combined > MAX_LOG_LINES) {
           logLines = [...logLines.slice(combined - MAX_LOG_LINES), ...lines];
@@ -242,6 +259,7 @@
     midiSize = bytes.byteLength;
     position = { tick: 0, secs: 0, bpm: 120, isPlaying: false };
     logLines = [];
+    channelStates = new Array(MAX_CHANNELS).fill(null);
     changeModeOverride('auto');
     client?.loadMidi(bytes);
   }
@@ -390,6 +408,16 @@
       </div>
     </div>
   </section>
+
+  {#if midiInfo}
+    <section>
+      <h2>Channels</h2>
+      <ChannelTable
+        states={channelStates}
+        portCount={midiInfo.port_count}
+      />
+    </section>
+  {/if}
 
   <section>
     <div class="log-header">
