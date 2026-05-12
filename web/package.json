@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
     "wasm": "wasm-pack build ../core --target web --out-dir ../web/src/wasm --out-name core && wasm-pack build ../core --target web --out-dir ../web/public/wasm --out-name core",
-    "wasm:dev": "wasm-pack build ../core --dev --target web --out-dir ../web/src/wasm --out-name core && wasm-pack build ../core --dev --target web --out-dir ../web/public/wasm --out-name core"
+    "wasm:dev": "wasm-pack build ../core --dev --target web --out-dir ../web/src/wasm --out-name core && wasm-pack build ../core --dev --target web --out-dir ../web/public/wasm --out-name core",
+    "cloudflare:build": "bash ../cloudflare-build.sh"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.1.2",

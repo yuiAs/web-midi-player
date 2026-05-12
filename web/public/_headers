@@ -1,0 +1,8 @@
+# Cloudflare Pages headers — applied at the edge to the built output.
+# COOP + COEP turn on `crossOriginIsolated`, which the AudioWorklet <-> wasm
+# SharedArrayBuffer ring buffer depends on. Vite's dev/preview servers set
+# the same headers (see vite.config.ts); this file is the production
+# counterpart.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
