@@ -379,6 +379,16 @@
       <LogView lines={filteredLogLines} bind:autoFollow />
     </section>
   {/if}
+
+  <footer>
+    <a
+      href="https://github.com/yuiAs/web-midi-player"
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      GitHub
+    </a>
+  </footer>
 </main>
 
 <style>
@@ -527,4 +537,18 @@
     font-size: 0.82rem;
     border-radius: 8px;
   }
+
+  footer {
+    margin-top: 2rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    text-align: right;
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+  }
+  footer a {
+    color: var(--fg-muted);
+    text-decoration: none;
+  }
+  footer a:hover { color: var(--fg); text-decoration: underline; }
 </style>
