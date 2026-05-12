@@ -40,6 +40,12 @@
   // ~10k lines × ~60 bytes ≈ 600 KB — comfortable.
   const MAX_LOG_LINES = 10_000;
 
+  // Debug flag read once at module load — toggling requires a reload.
+  // When false, the Log section is hidden and we skip buffering log lines,
+  // but the parsed channel state still updates because ChannelTable depends
+  // on the same log stream.
+  const debugEnabled = new URLSearchParams(location.search).has('debug');
+
   // ---- Bootstrap state -----------------------------------------------------
   let coreReady = $state(false);
   let coreVersion = $state('');
@@ -165,8 +171,10 @@
       onLogLines: (lines) => {
         // Fold every batch into channelStates BEFORE the log buffer trims —
         // a CC value we discard from the log would otherwise vanish from
-        // the channel table next reset cycle.
+        // the channel table next reset cycle. This runs even when the Log
+        // view is hidden so ChannelTable stays accurate.
         applyLogLines(channelStates, lines);
+        if (!debugEnabled) return;
         const combined = logLines.length + lines.length;
         if (combined > MAX_LOG_LINES) {
           logLines = [...logLines.slice(combined - MAX_LOG_LINES), ...lines];
@@ -419,30 +427,32 @@
     </section>
   {/if}
 
-  <section>
-    <div class="log-header">
-      <h2>Log</h2>
-      <div class="log-actions">
-        <Switch bind:checked={autoFollow} label="Auto-scroll" />
-        <button class="btn-ghost" onclick={() => (logLines = [])}>Clear</button>
-        <span class="dim">{logLines.length.toLocaleString()} events</span>
+  {#if debugEnabled}
+    <section>
+      <div class="log-header">
+        <h2>Log</h2>
+        <div class="log-actions">
+          <Switch bind:checked={autoFollow} label="Auto-scroll" />
+          <button class="btn-ghost" onclick={() => (logLines = [])}>Clear</button>
+          <span class="dim">{logLines.length.toLocaleString()} events</span>
+        </div>
       </div>
-    </div>
-    <div class="filter-chips">
-      {#each filterKeys as key}
-        <button
-          type="button"
-          class="chip"
-          class:active={filters[key]}
-          onclick={() => toggleFilter(key)}
-          aria-pressed={filters[key]}
-        >
-          {FILTER_LABELS[key]}
-        </button>
-      {/each}
-    </div>
-    <LogView lines={filteredLogLines} bind:autoFollow />
-  </section>
+      <div class="filter-chips">
+        {#each filterKeys as key}
+          <button
+            type="button"
+            class="chip"
+            class:active={filters[key]}
+            onclick={() => toggleFilter(key)}
+            aria-pressed={filters[key]}
+          >
+            {FILTER_LABELS[key]}
+          </button>
+        {/each}
+      </div>
+      <LogView lines={filteredLogLines} bind:autoFollow />
+    </section>
+  {/if}
 
   <footer>
     <a
