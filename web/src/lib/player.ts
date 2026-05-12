@@ -5,6 +5,9 @@
 const WORKLET_URL = '/worklet/synth-processor.js';
 const WASM_URL = '/wasm/core_bg.wasm';
 
+/** Reports bytes received during the WASM fetch. `total` is 0 if unknown. */
+export type ProgressFn = (loaded: number, total: number) => void;
+
 /// 0=GM, 1=GS, 2=XG, 3=GM2. Matches the u8 returned by the Rust core.
 export type MidiModeId = 0 | 1 | 2 | 3;
 
@@ -63,29 +66,49 @@ export interface SynthClientEvents {
 const CLEAR_OVERRIDE = 255;
 
 export class SynthClient {
-  private ctx: AudioContext | null = null;
+  private readonly ctx: AudioContext;
   private node: AudioWorkletNode | null = null;
   private gain: GainNode | null = null;
-  private readyPromise: Promise<void> | null = null;
+  private preparePromise: Promise<void> | null = null;
 
-  constructor(private readonly events: SynthClientEvents = {}) {}
-
-  async start(): Promise<void> {
-    if (this.readyPromise) return this.readyPromise;
-    this.readyPromise = this.boot();
-    return this.readyPromise;
+  constructor(private readonly events: SynthClientEvents = {}) {
+    // Allocated up front so that resume() inside a click handler can fire
+    // synchronously without racing a deferred context construction.
+    // The context starts in `suspended` state until resume() runs.
+    this.ctx = new AudioContext();
   }
 
-  private async boot(): Promise<void> {
-    const ctx = new AudioContext();
-    this.ctx = ctx;
+  /**
+   * Fetch + compile the WASM, load the AudioWorklet, and wire the graph.
+   * Runs without user activation; the context stays suspended throughout.
+   * Idempotent — repeated calls return the same in-flight promise.
+   */
+  prepare(onProgress?: ProgressFn): Promise<void> {
+    if (!this.preparePromise) {
+      this.preparePromise = this.boot(onProgress);
+    }
+    return this.preparePromise;
+  }
 
+  /**
+   * Transition the AudioContext from `suspended` to `running`. Must be
+   * invoked during a user gesture (click/keydown) because browser
+   * autoplay policy gates resume() on transient activation.
+   */
+  resume(): Promise<void> {
+    if (this.ctx.state === 'suspended') {
+      return this.ctx.resume();
+    }
+    return Promise.resolve();
+  }
+
+  private async boot(onProgress?: ProgressFn): Promise<void> {
     const [wasmModule] = await Promise.all([
-      WebAssembly.compileStreaming(fetch(WASM_URL)),
-      ctx.audioWorklet.addModule(WORKLET_URL),
+      compileWasmWithProgress(WASM_URL, onProgress),
+      this.ctx.audioWorklet.addModule(WORKLET_URL),
     ]);
 
-    const node = new AudioWorkletNode(ctx, 'synth-processor', {
+    const node = new AudioWorkletNode(this.ctx, 'synth-processor', {
       numberOfInputs: 0,
       numberOfOutputs: 1,
       outputChannelCount: [2],
@@ -127,13 +150,9 @@ export class SynthClient {
 
     // Master gain sits between the worklet and destination so volume can
     // be tweaked without rebuilding the graph.
-    const gain = ctx.createGain();
+    const gain = this.ctx.createGain();
     this.gain = gain;
-    node.connect(gain).connect(ctx.destination);
-
-    if (ctx.state === 'suspended') {
-      await ctx.resume();
-    }
+    node.connect(gain).connect(this.ctx.destination);
   }
 
   /**
@@ -145,16 +164,15 @@ export class SynthClient {
    */
   setVolume(value: number): void {
     const g = this.gain;
-    const ctx = this.ctx;
-    if (!g || !ctx) return;
+    if (!g) return;
     const target = Math.max(0, value);
-    const now = ctx.currentTime;
+    const now = this.ctx.currentTime;
     g.gain.cancelScheduledValues(now);
     g.gain.setValueAtTime(g.gain.value, now);
     g.gain.linearRampToValueAtTime(target, now + 0.02);
   }
 
-  get audioContext(): AudioContext | null {
+  get audioContext(): AudioContext {
     return this.ctx;
   }
 
@@ -188,4 +206,40 @@ export class SynthClient {
   setLoop(enabled: boolean): void {
     this.node?.port.postMessage({ type: 'set_loop', enabled });
   }
+}
+
+/**
+ * Compile WASM while reporting fetch progress.
+ *
+ * A TransformStream taps the byte count without buffering the whole
+ * module — the raw stream still flows into `compileStreaming` so we
+ * keep the parallel-compile speed-up. Falls back to plain streaming
+ * compile when there is nothing to report to.
+ */
+async function compileWasmWithProgress(
+  url: string,
+  onProgress?: ProgressFn,
+): Promise<WebAssembly.Module> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`fetch ${url}: ${response.status} ${response.statusText}`);
+  }
+  if (!onProgress || !response.body) {
+    return WebAssembly.compileStreaming(response);
+  }
+  const total = Number(response.headers.get('Content-Length') ?? 0);
+  let loaded = 0;
+  const counter = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      loaded += chunk.byteLength;
+      onProgress(loaded, total);
+      controller.enqueue(chunk);
+    },
+  });
+  const piped = response.body.pipeThrough(counter);
+  // compileStreaming requires `Content-Type: application/wasm`; the
+  // wrapper Response carries it because we strip the original headers.
+  return WebAssembly.compileStreaming(
+    new Response(piped, { headers: { 'Content-Type': 'application/wasm' } }),
+  );
 }

@@ -39,7 +39,13 @@
   let coreVersion = $state('');
   let crossOriginIsolated = $state(false);
 
-  let audioStatus = $state<'idle' | 'starting' | 'ready' | 'error'>('idle');
+  // `preparing` covers both the WASM load and the wait for the user's
+  // first gesture; `starting` is the brief window between click and
+  // `ctx.resume()` completing. The boot overlay is shown unless `ready`.
+  let audioStatus = $state<'preparing' | 'starting' | 'ready' | 'error'>('preparing');
+  let prepared = $state(false);
+  let wasmLoaded = $state(0);
+  let wasmTotal = $state(0);
   let workletSampleRate = $state<number | null>(null);
   let lastError = $state<string | null>(null);
 
@@ -87,10 +93,11 @@
   );
 
   let client: SynthClient | null = null;
-  // Handle fetched in onMount so the Start Audio click can synchronously
-  // consume it for requestPermission(), which requires transient user
-  // activation. Re-fetched on demand if the click beats onMount.
-  let pendingSf2Handle: FileSystemFileHandle | null = null;
+  let preparePromise: Promise<void> | null = null;
+  // Reactive so the "Restore last SF2" button shows up once the handle
+  // has been read from IndexedDB. Cleared after a successful restore or
+  // when the user revokes permission.
+  let pendingSf2Handle = $state<FileSystemFileHandle | null>(null);
 
   const canPlay = $derived(audioStatus === 'ready' && sf2Loaded && !!midiInfo);
 
@@ -110,44 +117,28 @@
 
   const filterKeys = Object.keys(FILTER_LABELS) as Array<keyof FilterFlags>;
 
-  onMount(async () => {
+  onMount(() => {
     crossOriginIsolated = self.crossOriginIsolated;
-    await loadCore();
-    coreVersion = core_version();
-    coreReady = true;
-    pendingSf2Handle = await loadSf2Handle();
-  });
 
-  async function startAudio() {
-    if (client) return;
-    audioStatus = 'starting';
-
-    // Resolve SF2 read permission while the user-activation from this
-    // click is still fresh. Browsers gate requestPermission() on transient
-    // activation; calling it from onReady (which arrives via postMessage)
-    // would always fail.
-    const handle = pendingSf2Handle ?? (await loadSf2Handle());
-    pendingSf2Handle = null;
-    let restorable: FileSystemFileHandle | null = null;
-    if (handle) {
-      if (await ensureReadPermission(handle)) {
-        restorable = handle;
-      } else {
-        await clearSf2Handle();
-      }
-    }
+    // Main-thread core init is independent of audio; let it resolve in
+    // the background so the version chip lights up when ready.
+    void loadCore().then(() => {
+      coreVersion = core_version();
+      coreReady = true;
+    });
+    void loadSf2Handle().then((h) => {
+      pendingSf2Handle = h;
+    });
 
     client = new SynthClient({
       onReady: (sr) => {
         workletSampleRate = sr;
-        audioStatus = 'ready';
         // The $effect for volume/loop already ran at mount with client=null,
         // so apply the current values explicitly now that the audio graph
         // exists. Otherwise the worklet keeps its built-in defaults instead
         // of the persisted ones.
         client?.setVolume((volume / 100) ** 2);
         client?.setLoop(loopEnabled);
-        if (restorable) void loadSf2FromHandle(restorable);
       },
       onSf2Loaded: () => {
         sf2Loaded = true;
@@ -171,12 +162,58 @@
         audioStatus = 'error';
       },
     });
+
+    // Kick off WASM compile + worklet load eagerly. No user gesture is
+    // required for this phase; the context stays suspended until the
+    // overlay click runs resume().
+    preparePromise = client.prepare((loaded, total) => {
+      wasmLoaded = loaded;
+      wasmTotal = total;
+    });
+    preparePromise
+      .then(() => {
+        prepared = true;
+      })
+      .catch((e) => {
+        lastError = String(e);
+        audioStatus = 'error';
+      });
+  });
+
+  async function startAudio() {
+    if (audioStatus !== 'preparing' || !client || !preparePromise) return;
+    audioStatus = 'starting';
+    // Dispatch resume() synchronously inside the click handler so the
+    // transient activation token is consumed before any await — a long
+    // WASM compile would otherwise expire the gesture (~5 s window) and
+    // the resume would silently fail.
+    const resumePromise = client.resume();
     try {
-      await client.start();
+      await preparePromise;
+      await resumePromise;
+      audioStatus = 'ready';
     } catch (e) {
       lastError = String(e);
       audioStatus = 'error';
     }
+  }
+
+  function onOverlayKey(e: KeyboardEvent) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      void startAudio();
+    }
+  }
+
+  async function restoreSf2() {
+    const handle = pendingSf2Handle;
+    if (!handle || !client) return;
+    if (await ensureReadPermission(handle)) {
+      await loadSf2FromHandle(handle);
+    } else {
+      await clearSf2Handle();
+    }
+    pendingSf2Handle = null;
   }
 
   function handleSf2(
@@ -277,108 +314,107 @@
     </div>
   </header>
 
-  {#if audioStatus !== 'ready'}
-    <section class="boot">
-      <button class="btn-primary" onclick={startAudio} disabled={audioStatus !== 'idle'}>
-        {audioStatus === 'idle' ? 'Start Audio' : audioStatus}
-      </button>
-      {#if lastError}<p class="err"><code>{lastError}</code></p>{/if}
-    </section>
-  {:else}
-    <section>
-      <h2>Files</h2>
-      <FileLoader
-        label="SF2"
-        accept=".sf2,.sf3"
-        fileName={sf2Name}
-        fileSize={sf2Size}
-        onload={handleSf2}
-      />
-      <FileLoader
-        label="MIDI"
-        accept=".mid,.midi"
-        fileName={midiName}
-        fileSize={midiSize}
-        onload={handleMidi}
-      />
-      {#if lastError}<p class="err"><code>{lastError}</code></p>{/if}
-    </section>
-
-    <section>
-      <h2>Mode</h2>
-      <Segmented
-        options={modeOptions}
-        value={modeOverride}
-        onchange={changeModeOverride}
-      />
-      <p class="meta">
-        effective: <code>{effectiveMode === null ? '-' : MODE_LABELS[effectiveMode]}</code>
-        {#if midiInfo && modeOverride === 'auto'}
-          <span class="dim">(detected from file)</span>
-        {/if}
-      </p>
-    </section>
-
-    {#if midiInfo}
-      <section>
-        <h2>Info</h2>
-        <dl>
-          <dt>SMF format</dt><dd><code>{midiInfo.format}</code></dd>
-          <dt>Tracks</dt><dd><code>{midiInfo.track_count}</code></dd>
-          <dt>Ports</dt><dd><code>{midiInfo.port_count}</code></dd>
-          <dt>Resolution</dt><dd><code>{midiInfo.ticks_per_quarter} TPQ</code></dd>
-          <dt>Notes</dt><dd><code>{midiInfo.total_notes.toLocaleString()}</code></dd>
-          <dt>BPM</dt><dd><code>{position.bpm.toFixed(2)}</code></dd>
-          <dt>Duration</dt><dd><code>{fmtTime(midiInfo.duration_secs)}</code></dd>
-        </dl>
-      </section>
+  <section>
+    <h2>Files</h2>
+    <FileLoader
+      label="SF2"
+      accept=".sf2,.sf3"
+      fileName={sf2Name}
+      fileSize={sf2Size}
+      onload={handleSf2}
+    />
+    {#if pendingSf2Handle && audioStatus === 'ready'}
+      <div class="restore-row">
+        <button class="btn-ghost" type="button" onclick={restoreSf2}>
+          前回のSF2を復元
+        </button>
+        <span class="dim">stored from last visit</span>
+      </div>
     {/if}
+    <FileLoader
+      label="MIDI"
+      accept=".mid,.midi"
+      fileName={midiName}
+      fileSize={midiSize}
+      onload={handleMidi}
+    />
+    {#if lastError}<p class="err"><code>{lastError}</code></p>{/if}
+  </section>
 
-    <section>
-      <h2>Transport</h2>
-      <Controls
-        {canPlay}
-        isPlaying={position.isPlaying}
-        onplaypause={playPause}
-        onstop={() => client?.stop()}
-      />
-      <div class="transport-meta">
-        <span class="time">
-          <code>{fmtTime(position.secs)}</code>
-          <span class="dim">/ {fmtTime(midiInfo?.duration_secs ?? 0)}</span>
-        </span>
-        <div class="transport-controls">
-          <Slider bind:value={volume} label="Vol" format={(v) => `${v}%`} />
-          <Switch bind:checked={loopEnabled} label="Loop" />
-        </div>
-      </div>
-    </section>
+  <section>
+    <h2>Mode</h2>
+    <Segmented
+      options={modeOptions}
+      value={modeOverride}
+      onchange={changeModeOverride}
+    />
+    <p class="meta">
+      effective: <code>{effectiveMode === null ? '-' : MODE_LABELS[effectiveMode]}</code>
+      {#if midiInfo && modeOverride === 'auto'}
+        <span class="dim">(detected from file)</span>
+      {/if}
+    </p>
+  </section>
 
+  {#if midiInfo}
     <section>
-      <div class="log-header">
-        <h2>Log</h2>
-        <div class="log-actions">
-          <Switch bind:checked={autoFollow} label="Auto-scroll" />
-          <button class="btn-ghost" onclick={() => (logLines = [])}>Clear</button>
-          <span class="dim">{logLines.length.toLocaleString()} events</span>
-        </div>
-      </div>
-      <div class="filter-chips">
-        {#each filterKeys as key}
-          <button
-            type="button"
-            class="chip"
-            class:active={filters[key]}
-            onclick={() => toggleFilter(key)}
-            aria-pressed={filters[key]}
-          >
-            {FILTER_LABELS[key]}
-          </button>
-        {/each}
-      </div>
-      <LogView lines={filteredLogLines} bind:autoFollow />
+      <h2>Info</h2>
+      <dl>
+        <dt>SMF format</dt><dd><code>{midiInfo.format}</code></dd>
+        <dt>Tracks</dt><dd><code>{midiInfo.track_count}</code></dd>
+        <dt>Ports</dt><dd><code>{midiInfo.port_count}</code></dd>
+        <dt>Resolution</dt><dd><code>{midiInfo.ticks_per_quarter} TPQ</code></dd>
+        <dt>Notes</dt><dd><code>{midiInfo.total_notes.toLocaleString()}</code></dd>
+        <dt>BPM</dt><dd><code>{position.bpm.toFixed(2)}</code></dd>
+        <dt>Duration</dt><dd><code>{fmtTime(midiInfo.duration_secs)}</code></dd>
+      </dl>
     </section>
   {/if}
+
+  <section>
+    <h2>Transport</h2>
+    <Controls
+      {canPlay}
+      isPlaying={position.isPlaying}
+      onplaypause={playPause}
+      onstop={() => client?.stop()}
+    />
+    <div class="transport-meta">
+      <span class="time">
+        <code>{fmtTime(position.secs)}</code>
+        <span class="dim">/ {fmtTime(midiInfo?.duration_secs ?? 0)}</span>
+      </span>
+      <div class="transport-controls">
+        <Slider bind:value={volume} label="Vol" format={(v) => `${v}%`} />
+        <Switch bind:checked={loopEnabled} label="Loop" />
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="log-header">
+      <h2>Log</h2>
+      <div class="log-actions">
+        <Switch bind:checked={autoFollow} label="Auto-scroll" />
+        <button class="btn-ghost" onclick={() => (logLines = [])}>Clear</button>
+        <span class="dim">{logLines.length.toLocaleString()} events</span>
+      </div>
+    </div>
+    <div class="filter-chips">
+      {#each filterKeys as key}
+        <button
+          type="button"
+          class="chip"
+          class:active={filters[key]}
+          onclick={() => toggleFilter(key)}
+          aria-pressed={filters[key]}
+        >
+          {FILTER_LABELS[key]}
+        </button>
+      {/each}
+    </div>
+    <LogView lines={filteredLogLines} bind:autoFollow />
+  </section>
 
   <footer>
     <a
@@ -390,6 +426,46 @@
     </a>
   </footer>
 </main>
+
+{#if audioStatus !== 'ready'}
+  <!-- Full-page gesture trap. The browser will only resume() the audio
+       context from inside a user activation, so any click on this layer
+       doubles as the start signal. The main UI is rendered underneath so
+       the dismiss feels instantaneous, with no second layout pass. -->
+  <div
+    class="boot-overlay"
+    role="button"
+    tabindex="0"
+    aria-label="Click anywhere to start audio"
+    onclick={startAudio}
+    onkeydown={onOverlayKey}
+  >
+    <div class="boot-card" role="status" aria-live="polite">
+      {#if audioStatus === 'error'}
+        <h2>Audio failed to start</h2>
+        {#if lastError}<p class="err"><code>{lastError}</code></p>{/if}
+        <p class="dim">Reload the page to retry.</p>
+      {:else if audioStatus === 'starting'}
+        <h2>Starting…</h2>
+        <progress aria-label="starting audio"></progress>
+      {:else if prepared}
+        <h2>Ready</h2>
+        <p>Click anywhere — or press Enter — to start audio.</p>
+      {:else}
+        <h2>Loading core…</h2>
+        {#if wasmTotal > 0}
+          <progress value={wasmLoaded} max={wasmTotal}></progress>
+          <p class="dim">
+            {(wasmLoaded / 1024).toFixed(0)} / {(wasmTotal / 1024).toFixed(0)} KB
+          </p>
+        {:else}
+          <progress aria-label="loading WASM"></progress>
+        {/if}
+        <p class="dim hint">You can click now; playback will start as soon as the core is ready.</p>
+      {/if}
+    </div>
+  </div>
+{/if}
 
 <style>
   main {
@@ -423,7 +499,55 @@
   .status-line .warn { color: var(--danger); }
 
   section { margin-bottom: 1.5rem; }
-  section.boot { text-align: center; padding: 2rem 0; }
+
+  .restore-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin: 0.25rem 0 0.5rem 4rem;
+    font-size: 0.85rem;
+  }
+
+  .boot-overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: color-mix(in srgb, var(--bg) 70%, transparent);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    z-index: 100;
+    cursor: pointer;
+  }
+  .boot-overlay:focus-visible {
+    outline: none;
+  }
+  .boot-overlay:focus-visible .boot-card {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .boot-card {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.6rem 2rem;
+    min-width: 280px;
+    max-width: min(420px, calc(100vw - 2rem));
+    text-align: center;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.18);
+  }
+  .boot-card h2 { margin: 0 0 0.6rem; }
+  .boot-card p { margin: 0.4rem 0 0; font-size: 0.9rem; }
+  .boot-card .hint { margin-top: 0.6rem; font-size: 0.78rem; }
+  .boot-card progress {
+    display: block;
+    width: 100%;
+    height: 8px;
+    margin: 0.5rem 0 0.2rem;
+    accent-color: var(--accent);
+  }
 
   code {
     background: var(--code-bg);
@@ -521,17 +645,6 @@
     outline-offset: 1px;
   }
 
-  .btn-primary {
-    padding: 0.55rem 1.4rem;
-    font-size: 0.95rem;
-    background: var(--accent);
-    color: var(--accent-fg);
-    border-color: var(--accent);
-    border-radius: 8px;
-  }
-  .btn-primary:hover:not(:disabled) {
-    filter: brightness(1.06);
-  }
   .btn-ghost {
     padding: 0.25rem 0.85rem;
     font-size: 0.82rem;
