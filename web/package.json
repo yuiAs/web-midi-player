@@ -6,13 +6,15 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview",
+    "preview": "npm run build && wrangler dev",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
     "wasm": "wasm-pack build ../core --target web --out-dir ../web/src/wasm --out-name core && wasm-pack build ../core --target web --out-dir ../web/public/wasm --out-name core",
     "wasm:dev": "wasm-pack build ../core --dev --target web --out-dir ../web/src/wasm --out-name core && wasm-pack build ../core --dev --target web --out-dir ../web/public/wasm --out-name core",
-    "cloudflare:build": "bash ../cloudflare-build.sh"
+    "cloudflare:build": "bash ../cloudflare-build.sh",
+    "deploy": "npm run build && wrangler deploy"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.36.3",
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
     "@tsconfig/svelte": "^5.0.8",
     "@types/audioworklet": "^0.0.100",
@@ -21,7 +23,8 @@
     "svelte-check": "^4.4.8",
     "typescript": "~6.0.2",
     "vite": "^8.0.12",
-    "vite-plugin-wasm": "^3.6.0"
+    "vite-plugin-wasm": "^3.6.0",
+    "wrangler": "^4.90.0"
   },
   "dependencies": {
     "@tanstack/svelte-virtual": "^3.13.24",

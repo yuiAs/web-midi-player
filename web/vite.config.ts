@@ -2,6 +2,8 @@ import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import wasm from 'vite-plugin-wasm';
 
+import { cloudflare } from "@cloudflare/vite-plugin";
+
 // COOP+COEP enable `cross-origin-isolated`, which is required for
 // SharedArrayBuffer (used later by the AudioWorklet <-> main ring buffer).
 const crossOriginIsolationHeaders = {
@@ -10,7 +12,7 @@ const crossOriginIsolationHeaders = {
 };
 
 export default defineConfig({
-  plugins: [svelte(), wasm()],
+  plugins: [svelte(), wasm(), cloudflare()],
   server: {
     headers: crossOriginIsolationHeaders,
   },
